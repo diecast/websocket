@@ -1,0 +1,15 @@
+[package]
+name = "diecast-websocket"
+version = "0.1.0"
+authors = ["Jorge Israel Peña <jorge.israel.p@gmail.com>"]
+
+[dependencies]
+# websocket = "*"
+toml = "*"
+
+[dependencies.diecast]
+path = "../diecast"
+
+[dependencies.websocket]
+path = "../../rust-websocket"
+
