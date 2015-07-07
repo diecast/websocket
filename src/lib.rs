@@ -1,5 +1,4 @@
 extern crate diecast;
-extern crate toml;
 extern crate websocket;
 
 use std::sync::{Arc, Mutex};
@@ -12,7 +11,7 @@ use websocket::{Server, Message, Sender};
 use websocket::server::request::RequestUri;
 use websocket::result::WebSocketError;
 
-use diecast::{Handle, Bind};
+use diecast::{Handle, Item};
 
 pub struct WebsocketPipe {
     ws_tx: Mutex<mpsc::Sender<Update>>,
@@ -24,32 +23,21 @@ pub fn pipe(ws_tx: mpsc::Sender<Update>) -> WebsocketPipe {
     }
 }
 
-impl Handle<Bind> for WebsocketPipe {
-    fn handle(&self, bind: &mut Bind) -> diecast::Result<()> {
+impl Handle<Item> for WebsocketPipe {
+    fn handle(&self, item: &mut Item) -> diecast::Result<()> {
         let ws_tx = {
             let sender = self.ws_tx.lock().unwrap();
             sender.clone()
         };
 
-        for item in bind {
-            // TODO
-            // use a predicate instead
-            //
-            // if let Some(meta) = item.extensions.get::<item::Metadata>() {
-            //     if !meta.lookup("push").and_then(toml::Value::as_bool).unwrap_or(true) {
-            //         continue;
-            //     }
-            // }
+        // TODO
+        // need better api for route access
+        let uri = format!("/{}", item.route().reading().unwrap().display());
 
-            // TODO
-            // need better api for route access
-            let uri = format!("/{}", item.route().reading().unwrap().display());
-
-            ws_tx.send(Update {
-                url: uri,
-                body: item.body.clone(),
-            }).unwrap();
-        }
+        ws_tx.send(Update {
+            url: uri,
+            body: item.body.clone(),
+        }).unwrap();
 
         Ok(())
     }
@@ -76,12 +64,11 @@ pub fn init() -> mpsc::Sender<Update> {
             if let Some(channels) = reader.get_mut(&update.url) {
                 for (addr, sender) in channels.iter_mut() {
                     match sender.send_message(Message::Text(update.body.clone())) {
-                        Ok(()) => println!("sent new"),
+                        Ok(()) => (),
                         // handle the case where the user disconnected
                         Err(WebSocketError::IoError(e)) => {
                             if let ::std::io::ErrorKind::BrokenPipe = e.kind() {
                                 // TODO: need to remove the client if this occurs
-                                println!("client from {} disconnected", addr);
                                 prune.push(addr.clone());
                             } else {
                                 panic!("{:?}", e);
@@ -92,7 +79,6 @@ pub fn init() -> mpsc::Sender<Update> {
                 }
 
                 for addr in prune {
-                    println!("pruning {}", addr);
                     channels.remove(&addr).unwrap();
                 }
             }
@@ -100,9 +86,10 @@ pub fn init() -> mpsc::Sender<Update> {
     });
 
     thread::spawn(move || {
+        // TODO: make configurable programmatically and via Diecast.toml
         let server = Server::bind("0.0.0.0:9160").unwrap();
 
-        for (idx, connection) in server.enumerate() {
+        for connection in server {
             let writer = writer.clone();
 
             thread::spawn(move || {
@@ -110,7 +97,6 @@ pub fn init() -> mpsc::Sender<Update> {
 
                 let uri = match request.url {
                     RequestUri::AbsolutePath(ref path) => {
-                        println!("request received for {}", path);
                         Some(path.clone())
                     },
                     _ => None,
@@ -120,7 +106,6 @@ pub fn init() -> mpsc::Sender<Update> {
                 let mut client = response.send().unwrap();
 
                 let ip = client.get_mut_sender().get_mut().peer_addr().unwrap();
-                println!("WS connection #{} from {}", idx + 1, ip);
 
                 // TODO should monitor receiver to detect close events
                 let (sender, _receiver) = client.split();
@@ -136,5 +121,4 @@ pub fn init() -> mpsc::Sender<Update> {
 
     tx
 }
-
 
