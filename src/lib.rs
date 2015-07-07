@@ -33,11 +33,12 @@ impl Handle<Item> for WebsocketPipe {
         // TODO
         // need better api for route access
         let uri = format!("/{}", item.route().reading().unwrap().display());
-
-        ws_tx.send(Update {
+        let update = Update {
             url: uri,
             body: item.body.clone(),
-        }).unwrap();
+        };
+
+        try!(ws_tx.send(update));
 
         Ok(())
     }
