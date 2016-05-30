@@ -51,7 +51,7 @@ pub struct Update {
 
 pub fn init() -> mpsc::Sender<Update> {
     let (tx, rx) = channel::<Update>();
-    let channels: Arc<Mutex<HashMap<String, HashMap<SocketAddr, ::websocket::server::sender::Sender<_>>>>> =
+    let channels: Arc<Mutex<HashMap<String, HashMap<SocketAddr, ::websocket::sender::Sender<_>>>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     let reader = channels.clone();
@@ -64,7 +64,7 @@ pub fn init() -> mpsc::Sender<Update> {
 
             if let Some(channels) = reader.get_mut(&update.url) {
                 for (addr, sender) in channels.iter_mut() {
-                    match sender.send_message(Message::Text(update.body.clone())) {
+                    match sender.send_message(&Message::text(update.body.clone())) {
                         Ok(()) => (),
                         // handle the case where the user disconnected
                         Err(WebSocketError::IoError(e)) => {
