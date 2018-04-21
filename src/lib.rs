@@ -1,15 +1,11 @@
 extern crate diecast;
-extern crate websocket;
+extern crate ws;
 
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, channel};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::thread;
-
-use websocket::{Server, Message, Sender};
-use websocket::server::request::RequestUri;
-use websocket::result::WebSocketError;
 
 use diecast::{Handle, Item};
 
@@ -44,82 +40,126 @@ impl Handle<Item> for WebsocketPipe {
     }
 }
 
+#[derive(Debug)]
 pub struct Update {
     url: String,
     body: String,
 }
 
-pub fn init() -> mpsc::Sender<Update> {
-    let (tx, rx) = channel::<Update>();
-    let channels: Arc<Mutex<HashMap<String, HashMap<SocketAddr, ::websocket::sender::Sender<_>>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+struct WebSocketHandler {
+    ws: ws::Sender,
+    path: String,
+    registry: Arc<Mutex<SocketRegistry>>,
+}
 
-    let reader = channels.clone();
-    let writer = channels.clone();
+impl ws::Handler for WebSocketHandler {
+    fn on_open(&mut self, shake: ws::Handshake) -> ws::Result<()> {
+        // Get the request.
+        self.path = shake.request.resource().to_string();
 
-    thread::spawn(move || {
-        for update in rx.iter() {
-            let mut reader = reader.lock().unwrap();
-            let mut prune = vec![];
+        println!("Received connection for {}", self.path);
 
-            if let Some(channels) = reader.get_mut(&update.url) {
-                for (addr, sender) in channels.iter_mut() {
-                    match sender.send_message(&Message::text(update.body.clone())) {
-                        Ok(()) => (),
-                        // handle the case where the user disconnected
-                        Err(WebSocketError::IoError(e)) => {
-                            if let ::std::io::ErrorKind::BrokenPipe = e.kind() {
-                                // TODO: need to remove the client if this occurs
-                                prune.push(addr.clone());
-                            } else {
-                                panic!("{:?}", e);
-                            }
-                        },
-                        Err(e) => panic!(e),
-                    }
-                }
+        self.registry.lock().unwrap().add_client(self);
 
-                for addr in prune {
-                    channels.remove(&addr).unwrap();
-                }
+        Ok(())
+    }
+
+    fn on_close(&mut self, _code: ws::CloseCode, _reason: &str) {
+        println!("Removed connection for {}", self.path);
+
+        self.registry.lock().unwrap().remove_client(self);
+    }
+}
+
+impl WebSocketHandler {
+    pub fn new(ws: ws::Sender, registry: Arc<Mutex<SocketRegistry>>) -> WebSocketHandler {
+        WebSocketHandler {
+            ws: ws,
+            path: "".to_string(),
+            registry: registry,
+        }
+    }
+}
+
+struct SocketRegistry {
+    // mapping Path → {Token → Sender}
+    clients: HashMap<String, HashMap<ws::util::Token, ws::Sender>>,
+}
+
+impl SocketRegistry {
+    fn new() -> SocketRegistry {
+        SocketRegistry {
+            clients: HashMap::new(),
+        }
+    }
+
+    // Insert the sender into the hashmap for this url
+    fn add_client(&mut self, client: &WebSocketHandler) {
+        self.clients
+            .entry(client.path.clone()).or_insert(HashMap::new())
+            .entry(client.ws.token()).or_insert(client.ws.clone());
+
+        println!("added client {:?}", client.ws.token());
+    }
+
+    // Remove the sender
+    fn remove_client(&mut self, client: &WebSocketHandler) {
+        if let Some(clients) = self.clients.get_mut(&client.path) {
+            clients.remove(&client.ws.token()).unwrap();
+        }
+
+        println!("removed client {:?}", client.ws.token());
+    }
+
+    // Go through each client subscribed to this path and send the update
+    fn send_update(&self, update: Update) {
+        if let Some(clients) = self.clients.get(&update.url) {
+            for (_token, sender) in clients.iter() {
+                sender.send(update.body.clone()).unwrap();
             }
         }
-    });
+    }
+}
 
-    thread::spawn(move || {
-        // TODO: make configurable programmatically and via Diecast.toml
-        let server = Server::bind("0.0.0.0:9160").unwrap();
+struct WebSocketServer {
+    registry: Arc<Mutex<SocketRegistry>>,
+}
 
-        for connection in server {
-            let writer = writer.clone();
-
-            thread::spawn(move || {
-                let request = connection.unwrap().read_request().unwrap();
-
-                let uri = match request.url {
-                    RequestUri::AbsolutePath(ref path) => {
-                        Some(path.clone())
-                    },
-                    _ => None,
-                };
-
-                let response = request.accept();
-                let mut client = response.send().unwrap();
-
-                let ip = client.get_mut_sender().get_mut().peer_addr().unwrap();
-
-                // TODO should monitor receiver to detect close events
-                let (sender, _receiver) = client.split();
-
-                let mut writer = writer.lock().unwrap();
-
-                writer
-                    .entry(uri.unwrap()).or_insert(HashMap::new())
-                    .entry(ip).or_insert(sender);
-            });
+impl WebSocketServer {
+    pub fn new(registry: Arc<Mutex<SocketRegistry>>) -> WebSocketServer {
+        WebSocketServer {
+            registry: registry,
         }
-    });
+    }
+}
+
+impl ws::Factory for WebSocketServer {
+    type Handler = WebSocketHandler;
+
+    fn connection_made(&mut self, sender: ws::Sender) -> Self::Handler {
+        // Create handler.
+        WebSocketHandler::new(sender, self.registry.clone())
+    }
+}
+
+// Initialize websocket server and return a channel sender-end used to publish
+// Updates to pages.
+pub fn init() -> mpsc::Sender<Update> {
+    let (tx, rx) = channel::<Update>();
+
+    {
+        let registry = Arc::new(Mutex::new(SocketRegistry::new()));
+        let server = WebSocketServer::new(registry.clone());
+        let websocket = ws::WebSocket::new(server).unwrap();
+
+        thread::spawn(move || {
+            for update in rx.iter() {
+                registry.lock().unwrap().send_update(update);
+            }
+        });
+
+        thread::spawn(move || websocket.listen("0.0.0.0:9160").unwrap());
+    }
 
     tx
 }
-
